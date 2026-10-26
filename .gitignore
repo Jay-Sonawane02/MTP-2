@@ -1,0 +1,56 @@
+# ─── Model weights & exported formats ──────────────────────────────
+*.pt
+*.pth
+*.onnx
+*.tflite
+*.cvimodel
+*.param
+*.bin
+!requirements.txt
+best_ncnn_model/
+best_saved_model/
+
+# ─── Calibration / large numpy data ────────────────────────────────
+*.npy
+
+# ─── Captured images & generated datasets (large volumes of JPGs) ─
+chamber_capture/
+chamber_capture_TEST/
+demo_captures/
+events/
+pi_captures/
+pi_frames/
+phase_a_crops/
+phase_a_blackbg/
+YOLO_SAM/dataset/
+YOLO_SAM/dataset_3class/
+YOLO_SAM/fullframe_dataset/
+YOLO_SAM/validation_preview/
+
+# ─── Training run outputs (weights, batch images, logs per run) ───
+runs/
+YOLO_SAM/runs/
+
+# ─── Loose scratch/test images at top level ────────────────────────
+test_result.jpg
+empty_check.jpg
+
+# ─── LaTeX build artifacts (Report/) ───────────────────────────────
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+texput.log
+
+# ─── Python ─────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+venv/
+.venv/
+yolo/
+
+# ─── OS junk ────────────────────────────────────────────────────────
+Thumbs.db
+.DS_Store
+desktop.ini
