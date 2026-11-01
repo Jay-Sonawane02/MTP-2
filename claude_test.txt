@@ -1,0 +1,4 @@
+This is a test file written by Claude to confirm the local-edit → git push workflow.
+
+If you can see this file in your GitHub repo after pushing, the workflow works:
+Claude writes/edits files in D:\MTP-2 → you run git add/commit/push → changes appear on GitHub.

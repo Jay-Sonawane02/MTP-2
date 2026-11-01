@@ -56,71 +56,79 @@
 \tableofcontents
 \newpage
 
+
 \chapter{Introduction}
 
-MTP Stage-1 established a classification pipeline for tomato ripeness using MobileNetV2, demonstrated the effect of background standardization on accuracy, and carried out a preliminary exploration of YOLO-based detection using automatically generated annotations. That pipeline was trained and evaluated on a curated, segmented, single-tomato image dataset.
+MTP Stage-1 established a tomato ripeness classification pipeline using MobileNetV2. The work also investigated the effect of background standardization on classification accuracy and included a preliminary exploration of YOLO-based object detection using automatically generated annotations. The models were trained and evaluated on a curated dataset containing segmented images of individual tomatoes. Although this approach provided a useful starting point for the project, the images used during training and evaluation did not fully represent the conditions in which the system was eventually expected to operate.
 
-MTP Stage-2 moves the system out of that curated setting and into the physical sorting chamber that the classification model will actually operate in. This transition exposed a substantial gap between the Stage-1 model's performance on its own curated test set and its performance on live, real-world chamber footage. A central part of this stage was therefore diagnostic: identifying precisely why a model that reported near-perfect validation metrics in Stage-1 failed when pointed at the real chamber, before any further model development could be trusted.
+In MTP Stage-2, the focus shifted towards deploying the system in the physical tomato sorting chamber and evaluating its performance under actual operating conditions. Unlike the curated dataset used in Stage-1, images captured inside the chamber contained the original background and the reflections produced by the mirror arrangement used in the setup. The camera therefore captured the actual scene rather than an isolated tomato against a standardized background. This introduced a difference between the images seen by the model during training and those encountered during deployment.
 
-The specific objectives pursued in this stage are as follows.
+When the Stage-1 YOLO model was tested on images captured inside the actual chamber setup, its performance was significantly worse than its validation results had suggested. This indicated that good performance on the curated test dataset did not necessarily translate to reliable detection in the physical setup. The difference could not be addressed simply by training the same model for more epochs or increasing its size. A series of experiments was therefore conducted to identify the differences between the Stage-1 training images and the actual chamber images, and provided the basis for developing a more suitable dataset and detection pipeline.
 
-\begin{itemize}
-    \item Diagnose the cause of the Stage-1 YOLO model's failure on real chamber footage, through controlled experiments rather than assumption.
-    \item Build an annotation pipeline capable of labelling full, real-background chamber photographs -- rather than the segmented, background-removed images used in Stage-1 -- so that the resulting model is trained on data that matches its deployment conditions.
-    \item Extend the system to a three-class problem (unripe, ripe, overripe) using real chamber-captured data for all three classes, including overripe, which required sourcing and preparing data despite overripe tomatoes being difficult to procure.
-    \item Fine-tune a YOLO11n detection model on this chamber dataset and validate it against data the model had never seen during training, not only against a held-out split from the same capture session.
-    \item Deploy the resulting model on embedded hardware (a Raspberry Pi) and evaluate whether it can run at a useful speed and with its accuracy preserved outside a full desktop GPU environment.
-    \item Design and validate an event-triggered inference approach, so that the deployed model only performs inference when a tomato is actually present for classification, rather than running continuously.
-\end{itemize}
+Based on these observations, the data collection process was redesigned around the physical chamber. Images were captured using the chamber camera and its mirror arrangement, with the original background and lighting conditions retained. The dataset was extended to cover three ripeness categories: unripe, ripe, and overripe. Collecting data for the overripe category required additional effort because such tomatoes were relatively difficult to procure and maintain during the capture process. Multiple views of each tomato were collected so that the model could learn from the variations in appearance across the different camera views.
 
-This report documents the diagnostic process, the chamber data collection and annotation pipeline, the resulting fine-tuned model and its evaluation, and the embedded deployment work carried out on a Raspberry Pi, including a comparison of inference backends and an event-triggered inference design.
+Preparing annotations for these full-frame images presented another challenge. Since each image could contain multiple visible instances of the tomato due to the camera and mirror arrangement, manually drawing bounding boxes for every image would have been time-consuming. To reduce this effort, an annotation pipeline based on the Segment Anything Model 2 (SAM2) was developed. It generated candidate masks for objects in the captured images, which were then filtered to retain the relevant tomato instances. The selected masks were converted into bounding-box annotations in the format required for YOLO training. The resulting annotations were also visually inspected, and images with unsuitable detections were excluded where necessary.
 
-\chapter{Recap of MTP Stage-1}
+Using the newly collected and annotated dataset, a YOLO11n detection model was trained for the three ripeness classes. Since multiple images were captured for each tomato, randomly splitting individual frames could result in images of the same tomato appearing in both the training and validation sets. Such a split would not provide a reliable estimate of how the model performs on previously unseen tomatoes. The final dataset split was therefore performed at the tomato level. In addition to the held-out validation data, the model was evaluated on independently captured tomatoes to examine its ability to generalize beyond the original capture session.
 
-This chapter briefly summarizes the system developed in Stage-1, since the diagnostic work in Stage-2 (Chapter~4) is a direct response to limitations discovered in this prior system.
+The next part of the work focused on deploying the trained model on embedded hardware. A Raspberry Pi 4 Model B with 8 GB of RAM was used to evaluate whether the detection pipeline could operate outside the desktop GPU environment used during model development. The trained model was exported to a format suitable for deployment, and its predictions and inference time were compared across different execution environments. 
+
+Apart from model deployment, the way inference was initiated was also considered. Running the detection model continuously would require unnecessary computation when the chamber was empty or when no new tomato was being processed. To address this, an event-triggered inference mechanism was developed. It monitors the chamber for the presence of a tomato and waits for the scene to become sufficiently stable before capturing the required views and running classification. This allows the model to perform inference in response to an actual event rather than processing every incoming camera frame continuously.
+
+The work carried out in MTP Stage-2 therefore covers the transition from a model evaluated on curated images to a detection system tested under the conditions of the physical sorting chamber. It includes investigating the limitations of the earlier model, collecting and annotating a new dataset, training and evaluating a three-class detector, and deploying the model on embedded hardware. The event-triggered inference mechanism further explores how the detection pipeline can be operated as part of the setup.
+
+\chapter{Summary of Stage-1}
+
+This chapter provides a brief overview of the system developed during MTP Stage-1. It describes the initial hardware setup, the different modelling approaches that were explored, and the development of the detection pipeline. This background is useful for understanding the things carried out in Stage-2, which were motivated by limitations observed when the earlier model was tested in the physical sorting chamber.
 
 \section{Problem and Hardware Setup}
 
-The underlying problem is the automated classification of tomatoes into ripeness categories (unripe, ripe, overripe) for sorting. Stage-1 developed a vertical cylindrical prototype, built with the e-Yantra lab, consisting of a single camera paired with a mirror so that one captured frame contains both a direct view and a mirrored view of the tomato simultaneously, a roller mechanism to rotate the tomato for multi-view capture, and an Arduino-controlled feeder and sorting mechanism.
+The objective of the project is to automate the classification of tomatoes based on their ripeness, with the categories being unripe, ripe, and overripe. During Stage-1, a vertical cylindrical sorting chamber was developed in collaboration with the e-Yantra lab. The setup uses a camera along with a mirror arrangement that allows both a direct view and a mirrored view of the tomato to appear in a single captured frame. A roller mechanism is used to rotate the tomato, allowing images to be captured from different views. The setup also includes an Arduino-controlled feeder and sorting mechanism, which are intended to handle the movement and sorting of tomatoes.
 
 \section{Model Iterations}
 
-Three modelling approaches were explored in Stage-1.
+During Stage-1, three modelling approaches were explored, each addressing a different aspect of the classification and detection problem.
 
-\textbf{Model A} trained a MobileNetV2 classifier directly on raw, unprocessed tomato images. This model reached approximately 89\% validation accuracy, but analysis showed it was partly learning background-specific features rather than tomato-specific ones, which caused misclassification when the background varied.
+\textbf{Model A} used MobileNetV2 to classify raw tomato images without any preprocessing. It achieved approximately 89\% validation accuracy. However, further analysis indicated that the model was also learning features associated with the image background, rather than relying entirely on the appearance of the tomato. As a result, its predictions could be affected by changes in the background.
 
-\textbf{Model B} addressed this by standardizing the background: a saturation threshold was used to detect the tomato region, and everything outside it was replaced with solid black before training. This raised accuracy to approximately 97\%, and this background-standardization principle -- removing background variation from the training images -- became the basis for the automated annotation pipeline described next. It also, as later diagnosed in Stage-2, introduced a background-dependence problem of its own.
+To address this issue, \textbf{Model B} introduced a background-standardization step before classification. A saturation threshold was used to identify the tomato region, and the remaining pixels were replaced with a solid black background. This reduced background variation across the training images and improved the validation accuracy to approximately 97\%. The approach provided better results on the curated dataset, although, as discussed in the diagnostic chapter of this report, it also introduced a dependence on the standardized background. This became an important consideration when the model was later tested on images captured inside the sorting chamber.
 
-\textbf{Model C} explored a classical bounding-box localization approach combining edge detection and GrabCut-based segmentation. This was investigated for visualization purposes only and was not taken forward for training.
+\textbf{Model C} explored a different approach based on object localization. It used segmentation to identify the tomato region and generate a bounding box around it. This approach was primarily used for visualization and exploration and was not carried forward for model training.
 
-\section{Automated Annotation with SAM}
+\section{Exploration of YOLO-Based Approach}
 
-To move from classification toward detection, Stage-1 used the Segment Anything Model (SAM2) in automatic mask-generation mode to segment each curated tomato image, producing a clean object mask without manual annotation. The non-background pixels of this mask were then composited onto a black canvas, and a bounding box was computed as the extent of the mask. This labelled dataset was used to train a YOLO11s detection model, which reported a validation mAP50-95 of 0.995 -- a very high and, as this report's next chapter shows, misleadingly high figure.
+During Stage-1, a YOLO-based approach was also explored, given its widespread use in existing work. The objective was to investigate whether YOLO could be used for tomato localization and ripeness classification in the sorting system. Since the available dataset consisted of curated images of individual tomatoes, an automatic annotation pipeline was developed to prepare the dataset for training. The Segment Anything Model 2 (SAM2) was used in automatic mask-generation mode to obtain masks for the tomatoes in these images, avoiding the need for manual annotation. The generated masks were used to separate the tomatoes from their backgrounds and place them on a black canvas. Bounding boxes were then computed from the masks to generate annotations in the format required by YOLO.
 
+The resulting dataset was used to train a YOLO11s model, which achieved a validation mAP50-95 of 0.995. While this indicated very high performance on the Stage-1 validation data, the model's performance on actual chamber footage was considerably different. The gap between the curated images used for training and the images captured inside the sorting chamber became an important issue during Stage-2.
 \section{Mobile Deployment}
 
-The trained MobileNetV2 classifier (Model B) was converted to TensorFlow Lite and integrated into a Flutter mobile application, enabling on-device inference without requiring a continuous server connection. A probability-fusion scheme averaged softmax outputs across the direct and mirrored views captured by the chamber's camera to produce a single, more robust classification per tomato.
-
-\chapter{Literature Survey}
-
-The literature survey conducted at the start of Stage-1 -- covering deep learning-based classification systems, YOLO-based detection systems for agricultural sorting, and conveyor-based sorting hardware -- remains the relevant background for this stage and is not repeated here. The reader is referred to the Stage-1 report for that survey and its accompanying comparison table of existing systems.
-
-Stage-2's focus shifted from surveying modelling approaches to a diagnostic and systems-engineering problem: understanding why a previously-validated model failed outside its training distribution, and building the infrastructure to correct this and deploy the corrected model on embedded hardware. Accordingly, no additional literature review was undertaken for this stage; the relevant comparison in this stage is empirical, against the project's own Stage-1 results.
+Alongside the detection experiments, the MobileNetV2 classifier developed in Model B was prepared for mobile deployment. The trained model was converted to TensorFlow Lite and integrated into a Flutter application, allowing predictions to be performed directly on the mobile device without requiring a continuous connection to a server. Since each captured frame contained both a direct and a mirrored view of the tomato, the application used a probability-fusion approach. The softmax probability outputs from the two views were averaged to obtain a single classification for the tomato. This allowed information from both views to contribute to the final prediction.
 
 \chapter{Diagnosing the Stage-1 Model's Failure on Chamber Data}
 
-This chapter presents the central diagnostic investigation of Stage-2: understanding why the Stage-1 YOLO model, despite reporting a validation mAP50-95 of 0.995, failed when evaluated on real footage from the physical sorting chamber.
+This chapter presents the central diagnostic investigation of Stage-2: understanding why the Stage-1 YOLO model, despite reporting a validation mAP50-95 of 0.995, failed when evaluated on images captured from the physical sorting chamber.
 
 \section{Initial Observation: Live Chamber Failure}
 
-The Stage-1 YOLO11s model was first evaluated by running it live against the chamber's camera feed. Two failures were observed immediately. First, pointing the camera at a completely empty chamber produced a confident detection (class ``unripe'', confidence 0.97) where no tomato was present at all. Second, when a genuinely ripe tomato was placed in the chamber, the model frequently misclassified it as unripe or overripe rather than ripe.
+The Stage-1 YOLO11s model was first evaluated by running it live against the chamber's camera feed. Two failures were observed immediately. First, pointing the camera at a completely empty chamber produced a confident detection (class ``unripe'', confidence 0.97) where no tomato was present at all. Second, when a genuinely ripe tomato was placed in the chamber, the model frequently misclassified it as unripe or overripe rather than ripe. This contradicted the model's reported validation performance and indicated that the 0.995 mAP50-95 figure did not reflect how the model would behave in actual deployment.
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\linewidth]{images/diagnosis_empty_chamber.jpg}
+\caption{Empty chamber}
+\end{figure}
 
-This contradicted the model's reported validation performance and indicated that the 0.995 mAP50-95 figure did not reflect how the model would behave in actual deployment.
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\linewidth]{images/diagnosis_ripe_misclassified.jpg}
+\caption{Ripe tomato, misclassified}
+\end{figure}
+\section{Ruling Out Background Alone}
 
-\section{Ruling Out Model Capacity}
+Another possible explanation was that the model was failing because of the difference in backgrounds. During Stage-1, the tomatoes were presented against a solid black background, whereas the chamber images contained grey walls, the mirror, and other elements of the physical setup. To investigate whether this background difference was responsible for the poor performance, the same chamber images were re-segmented using SAM2, and the resulting tomato regions were composited onto a black background. The original image resolution and tomato size were retained, without cropping or resizing the images. This allowed us to examine the effect of changing the background while keeping the original chamber framing unchanged.
 
-One hypothesis was that YOLO11s, despite being a relatively small model, might still be too large or too small in the wrong way for this task. To test this, a YOLO11n model (approximately one-third the parameter count of YOLO11s) was trained on the identical Stage-1 dataset and evaluated on the same set of real chamber images (96 ripe and 95 unripe crops, captured from the physical chamber).
+If the background difference were the only reason for the failure, restoring the black background should have improved the model's performance. However, the opposite was observed. The ripe-class accuracy dropped to 0\%, with every ripe tomato being classified as ``overripe'' at confidence scores between 96\% and 98\%.
 
+This result showed that the background difference alone could not explain the model's failure. In fact, removing the original chamber background made the classification of ripe tomatoes even worse. This suggested that other differences between the training images and chamber footage, particularly the appearance of the tomatoes, were also affecting the model's predictions.
 \begin{table}[H]
 \centering
 \caption{Ripe-class accuracy on real chamber images, by model size}
@@ -136,42 +144,78 @@ YOLO11s & $\approx$9.4M & 18.8\% \\
 
 Both models failed on the ripe class to a similar degree, with the larger model performing marginally worse, not better. This rules out model capacity as the cause of the failure: a model-size explanation would predict the larger model should perform noticeably better, which was not observed.
 
-\section{Ruling Out Background Alone}
+\section{Identifying the Dataset Mismatch}
 
-A second hypothesis was that the mismatch was purely a background problem: the model was trained on tomatoes against solid black, and the chamber presents tomatoes against grey walls and a mirror, so the model might simply be confused by the presence of a real background. To test this directly, the same real chamber images were re-segmented using SAM2 and composited onto black -- replicating the Stage-1 training distribution's background exactly -- and re-evaluated.
+The consistent and highly confident misclassifications observed in the previous experiment suggested that the model was relying on visual features learned from the Stage-1 training dataset. A closer look at how the two datasets were collected provided an important clue. The Stage-1 dataset had been assembled from multiple sources, including images obtained from GitHub repositories and other publicly available sources. As a result, the tomatoes in the dataset could vary in their appearance, and the conditions under which the images were captured were not consistent.
 
-If background mismatch were the entire explanation, restoring a matching black background should have recovered accuracy close to the model's original reported performance. Instead, ripe-class accuracy dropped to 0\%, with the model assigning the ``overripe'' label to every single ripe tomato at 96--98\% confidence. This result is inconsistent with a background-only explanation: removing the background mismatch made the failure \emph{more} severe and more confident, not less.
-
-\section{Identifying the Actual Cause: a Colour-Lighting Mismatch}
-
-The consistency and high confidence of the black-background failure suggested the model was not confused, but was doing exactly what it had learned -- on data whose colour statistics did not match training. A direct visual comparison of a Stage-1 training image and a chamber-captured image of the same ripeness class supported this explanation.
+For Stage-2, a new set of tomatoes was procured from market, and their images were captured using the physical classification chamber. This provided greater control over the data collection process and ensured that the images represented the conditions in which the system was intended to operate. However, it also revealed a noticeable difference between the appearance of tomatoes in the earlier dataset and those captured now.
 
 \begin{figure}[H]
 \centering
-\begin{subfigure}[b]{0.35\linewidth}
-\centering
-\includegraphics[width=\linewidth]{images/domain_gap_a_training.jpg}
-\caption{Stage-1 training image (``ripe'')}
+
+\begin{subfigure}[t]{0.3\linewidth}
+    \centering
+    \includegraphics[height=4cm,keepaspectratio]{images/stage1_ripe_example.jpg}
+    \caption{Stage-1 training,\\ ``ripe''}
 \end{subfigure}
 \hfill
-\begin{subfigure}[b]{0.45\linewidth}
-\centering
-\includegraphics[width=\linewidth]{images/domain_gap_b_chamber.jpg}
-\caption{Chamber-captured ripe tomato}
+\begin{subfigure}[t]{0.3\linewidth}
+    \centering
+    \includegraphics[height=4cm,keepaspectratio]{images/stage1_overripe_example.jpg}
+    \caption{Stage-1 training,\\ ``overripe''}
 \end{subfigure}
-\caption{Colour comparison between Stage-1 training data and real chamber footage. The Stage-1 dataset's ``ripe'' class is dominated by a dull orange/amber tone, while the chamber's lighting renders a genuinely ripe tomato as a vivid, saturated red -- a colour the model had only ever seen labelled ``overripe'' during training.}
+\hfill
+\begin{subfigure}[t]{0.3\linewidth}
+    \centering
+    \includegraphics[height=4cm,keepaspectratio]{images/chamber_ripe_fullframe.jpg}
+    \caption{Stage-2 chamber-captured\\ ripe tomato}
+\end{subfigure}
+
+\caption{Comparison of tomato appearance in the Stage-1 dataset and the Stage-2 chamber-captured data.}
 \label{fig:domain-gap}
 \end{figure}
 
-This is consistent with every result above. The unripe class, which is separated from ripe/overripe by a large colour gap (green versus red), remained robust under both the live-chamber test and the black-background re-test, since a lighting shift large enough to matter for a fine distinction within the red spectrum is not large enough to push green into red. The ripe/overripe boundary, which depends on a much finer colour distinction, was the one that collapsed.
+As seen in Figure~\ref{fig:domain-gap}, the ripe tomatoes in the Stage-1 dataset predominantly have a dull orange or amber appearance. In contrast, the ripe tomatoes procured for Stage-2 and captured inside the classification chamber have a more vivid and saturated red appearance. Interestingly, this appearance is closer to that of the tomatoes labelled as ``overripe'' in the Stage-1 dataset. This difference in appearance could explain why the model frequently classified genuinely ripe tomatoes from the chamber as overripe. The model had learned the relationship between tomato appearance and ripeness labels from a dataset whose visual characteristics did not adequately represent the tomatoes encountered during actual deployment.
+
+This also helps explain why the unripe class remained relatively robust in both the live-chamber test and the black-background re-test. Unripe tomatoes are predominantly green, whereas ripe and overripe tomatoes have shades of red and orange. The visual difference between unripe and ripe tomatoes is relatively large, while distinguishing ripe from overripe tomatoes depends on finer variations in colour. The differences between the two datasets therefore had a greater impact on the distinction between ripe and overripe tomatoes, which is consistent with the observed misclassifications.
 
 \section{Localization as a Compounding Factor}
 
-A further, structurally independent issue was identified in the live-chamber detections: Stage-1 training labels had bounding boxes covering roughly 50--80\% of the frame (since the box was defined as the extent of the segmented, black-composited tomato, which was captured to fill most of the frame). In the real chamber feed, two tomato instances (the direct view and its mirror reflection) are each a much smaller fraction of a wider, cluttered frame. This scale and position mismatch is a second, independent reason the Stage-1 model struggled to even locate tomatoes reliably in chamber footage, on top of the colour-classification problem.
+Apart from the differences in tomato appearance, there was also a significant difference in how tomatoes were represented in the Stage-1 training images and the actual chamber footage. During Stage-1, the YOLO model was trained on images containing a single tomato, which occupied almost the entire frame. The bounding boxes consequently covered roughly 70--80\% of the image. Figure~\ref{fig:stage1-localization} shows examples of the training images and their corresponding bounding boxes.
 
+\begin{figure}[H]
+\centering
+
+\begin{subfigure}[t]{0.3\linewidth}
+    \centering
+    \includegraphics[height=4cm,keepaspectratio]{images/o (1958).jpg}
+    \caption{Overripe}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.3\linewidth}
+    \centering
+    \includegraphics[height=4cm,keepaspectratio]{images/r (1599).jpg}
+    \caption{Ripe}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.3\linewidth}
+    \centering
+    \includegraphics[height=4cm,keepaspectratio]{images/u (951).jpg}
+    \caption{Unripe}
+\end{subfigure}
+
+\caption{Examples of Stage-1 training images showing individual tomatoes and their YOLO bounding-box annotations.}
+\label{fig:stage1-localization}
+\end{figure}
+
+In contrast, the chamber camera captures a much wider scene containing both the direct view of the tomato and its reflection in the mirror. Each of these instances occupies a considerably smaller portion of the frame. The model therefore encountered a different localization problem during deployment: instead of detecting a large, isolated tomato, it had to locate smaller tomato instances within a wider scene containing the chamber background and hardware. This difference in object scale and framing made localization more challenging and further contributed to the poor performance of the Stage-1 model on real chamber footage.
 \section{Summary of the Diagnosis}
 
-Three controlled checks -- model-size comparison, background-only re-test, and direct visual colour comparison -- converge on the same conclusion: the Stage-1 YOLO model's black-background, single-object training data caused it to learn a colour-to-label mapping and an object-scale expectation that do not match the chamber's real lighting, background, and framing. This diagnosis directly motivated the data collection and annotation approach described in the next chapter: training on full, real chamber photographs rather than segmented, background-removed crops.
+The experiments and visual comparisons helped identify two major differences between the Stage-1 training data and the actual chamber footage. The first was the difference in tomato appearance. The Stage-1 dataset had been collected from multiple sources, and the appearance of tomatoes, particularly those belonging to the ripe class, differed from the tomatoes procured and captured during Stage-2. This affected the model's ability to distinguish between ripe and overripe tomatoes. The second difference was in object scale and framing. The Stage-1 YOLO model was trained on images containing a single tomato that occupied most of the frame, whereas the chamber camera captured a wider scene containing both the direct view and the mirror reflection of the tomato.
+
+The model-size comparison showed that increasing the model size did not improve its performance on chamber images. Similarly, the black-background re-test showed that the background difference alone could not explain the failure. Together, these observations indicated that the Stage-1 model had learned from a dataset that did not adequately represent the appearance and spatial arrangement of tomatoes in the actual sorting chamber.
+
+These findings motivated the data collection and annotation approach adopted in Stage-2. Instead of relying on images collected from different sources and training on isolated, background-removed tomato images, a new dataset was collected using tomatoes procured specifically for the project and captured inside the physical sorting chamber. The full chamber images were retained for annotation and model training so that the resulting model could be trained on data that more closely represented its intended deployment environment.
 
 \chapter{Chamber Dataset Collection and Annotation}
 
@@ -179,328 +223,293 @@ This chapter describes the data collection protocol used to capture real chamber
 
 \section{Capture Protocol}
 
-Images were captured using the chamber's existing camera and mirror setup, under a fixed white LED lighting preset. For each tomato, six frames were captured at different rotation positions, so that each training example reflects a specific pose of the fruit rather than a single canonical view. Each frame naturally contains two tomato instances -- the direct view and the mirror-reflected view -- consistent with the chamber's physical design from Stage-1.
+Images were captured using the existing camera and mirror arrangement in the sorting chamber. The white LED lighting was kept at a fixed preset throughout the capture process to maintain consistent lighting conditions. For each tomato, six frames were captured at different rotation positions, providing multiple views of the same tomato rather than relying on a single image. Each captured frame contained two visible instances of the tomato: the direct view and its reflection in the mirror, as in the original chamber setup developed during Stage-1.
 
 \begin{table}[H]
+\setlength{\intextsep}{8pt}
 \centering
-\caption{Chamber capture summary by class}
 \begin{tabular}{|l|c|c|c|}
 \hline
-\textbf{Class} & \textbf{Tomatoes captured} & \textbf{Positions/tomato} & \textbf{Frames} \\
+\textbf{Class} & \textbf{Tomatoes captured} & \textbf{Positions per tomato} & \textbf{Total frames} \\
 \hline
-Ripe & 8 (initial) + 3 (added later) & 6 & 48 + 18 \\
-Unripe & 7 (after removing 1 bad batch) & 6 & 42 \\
+Ripe & 11 & 6 & 66 \\
+Unripe & 7 & 6 & 42 \\
 Overripe & 8 & 6 & 48 \\
 \hline
 \end{tabular}
+\caption{Summary of images captured for each ripeness class}
+\label{tab:capture-summary}
 \end{table}
+\vspace{-1em}
 
-Overripe tomatoes were the most difficult class to source, since vendors do not sell tomatoes at this stage and natural ripening under ambient conditions was unreliable -- an earlier attempt to let tomatoes soften naturally resulted in mould on two fruits due to high room temperature and insufficient airflow between tomatoes. The overripe batch used in the final dataset was collected under corrected conditions (tomatoes spaced apart, with airflow, checked daily).
-
+Collecting overripe tomatoes was particularly challenging, as they were difficult to procure. To address this, some of the tomatoes initially used for collecting the ripe-class images were kept until they ripened further and were then used for capturing the overripe-class images.
 \section{Automated Full-Frame Annotation using SAM2}
 
-Unlike the Stage-1 pipeline, which segmented a single pre-cropped tomato per image, Stage-2 required locating and labelling \emph{two} tomato instances (direct and mirror view) within each full, real-background chamber photograph. The Segment Anything Model (SAM2), in automatic mask-generation mode, was used to propose candidate object masks across each full frame without requiring a manual click or bounding-box prompt per image.
+Unlike the Stage-1 pipeline, which worked with a single pre-cropped tomato in each image, Stage-2 required annotations for two tomato instances within each full chamber image: the direct view and its reflection in the mirror. To automate this process, the Segment Anything Model 2 (SAM2) was used in automatic mask-generation mode. This allowed candidate object masks to be generated across the entire image without requiring manual clicks or bounding-box prompts for individual images.
 
-SAM2's automatic mode proposes candidate masks based on general visual coherence (consistent boundaries, texture, and shape), with no built-in notion of ``tomato'' specifically. Several iterations were required to reliably isolate the two correct tomato instances from the candidates it proposed:
+However, SAM2 does not specifically recognize tomatoes. It generates masks based on visual features such as object boundaries, shape, and texture. As a result, the initial outputs sometimes included parts of the chamber hardware, such as the mirror frame and its mounting structure, along with the actual tomatoes. Some filtering was therefore required to identify the two relevant instances reliably.
 
-\begin{itemize}
-    \item An initial, unfiltered version occasionally selected the mirror's physical frame or mounting hardware as a candidate object, since these are also visually coherent, well-bounded shapes.
-    \item A colour-based filter was added, retaining only candidate masks whose pixels fell predominantly within a tomato-appropriate hue range (red/orange for ripe and overripe, green/yellow for unripe) and above a minimum saturation threshold. This filter removed the grey mirror-frame and wall false positives.
-    \item The two highest-scoring remaining candidates per frame -- scored by a combination of area, bounding-box fill ratio, and proximity to frame centre -- were retained as the direct and mirror tomato instances and converted to normalized YOLO-format bounding boxes.
-\end{itemize}
+A colour-based filtering step was introduced to eliminate these unwanted candidates. The pixels within each candidate mask were examined to determine whether their colours fell within a suitable hue range for tomatoes. Red and orange shades were considered for ripe and overripe tomatoes, while green and yellow shades were considered for unripe tomatoes. A minimum saturation threshold was also applied to reject candidates corresponding to grey surfaces, such as the mirror frame and chamber walls. Their bounding boxes were then extracted and converted into normalized YOLO-format annotations.
 
-\begin{figure}[H]
-\centering
-\begin{subfigure}[b]{0.3\linewidth}
-\centering
-\includegraphics[width=\linewidth]{images/sam_ripe.jpg}
-\caption{Ripe}
-\end{subfigure}
-\begin{subfigure}[b]{0.3\linewidth}
-\centering
-\includegraphics[width=\linewidth]{images/sam_unripe.jpg}
-\caption{Unripe}
-\end{subfigure}
-\begin{subfigure}[b]{0.3\linewidth}
-\centering
-\includegraphics[width=\linewidth]{images/sam_overripe.jpg}
-\caption{Overripe}
-\end{subfigure}
-\caption{Example SAM2-generated annotations on full, real-background chamber frames, one per class. Both the direct and mirror-view tomato instances are correctly localized in a single automatic pass, with the real chamber background preserved -- unlike the Stage-1 pipeline, which discarded the background entirely.}
-\label{fig:sam-annotations}
+\begin{figure}[!htbp]
+    \centering
+
+    \begin{subfigure}[t]{0.46\linewidth}
+        \centering
+        \includegraphics[width=\linewidth,height=4.2cm,keepaspectratio]{images/sam_ripe.jpg}
+        \caption{Ripe}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.46\linewidth}
+        \centering
+        \includegraphics[width=\linewidth,height=4.2cm,keepaspectratio]{images/sam_unripe.jpg}
+        \caption{Unripe}
+    \end{subfigure}
+
+    \vspace{0.2cm}
+
+    \begin{subfigure}[t]{0.46\linewidth}
+        \centering
+        \includegraphics[width=\linewidth,height=4.2cm,keepaspectratio]{images/sam_overripe.jpg}
+        \caption{Overripe}
+    \end{subfigure}
+
+    \caption{Examples of SAM2-generated bounding-box annotations on full chamber images.}
+    \label{fig:sam-annotations}
 \end{figure}
+Figure~\ref{fig:sam-annotations} shows examples of the generated annotations for all three ripeness classes. Both the direct and mirror-view instances are localized within the same image, while the original chamber background is retained. This differs from the Stage-1 annotation pipeline, where the tomato was separated from its background and placed on a black canvas.
 
-A small number of frames where the automatic pipeline failed to produce two valid instances (for example, where a single tomato's colour signature was weaker than usual, causing the colour filter to reject it) were identified through visual review and discarded rather than corrected manually, since the discarded fraction was small relative to the overall dataset.
-
+The annotation pipeline was not successful for every frame. In a small number of cases, the colour filter rejected one of the tomato instances because its colour distribution did not sufficiently match the selected range. Such frames were identified through visual inspection and discarded rather than corrected manually. Since only a small fraction of the collected frames was affected, this approach was used to maintain consistency in the automatically generated annotations.
 \section{Chamber Lighting as a Dataset Variable}
 
-Because the diagnosis in Chapter~4 established that the model's colour-to-ripeness mapping is sensitive to lighting conditions, the chamber's lighting was treated as a controlled variable throughout data collection: a fixed white preset and brightness level were used for every capture session, and this setting was later re-verified (Chapter~8) after unrelated hardware changes to the chamber's lighting controller, by measuring floor brightness in an empty frame against the mean brightness recorded across the training dataset.
+The diagnosis highlighted the importance of maintaining consistent visual conditions when collecting the chamber dataset. In particular, since the model's colour-based ripeness predictions can be affected by changes in image appearance, chamber lighting was treated as a controlled variable during data collection. A fixed white preset and brightness level were used across all capture sessions to maintain consistency.
+
+The chamber's LED lighting is driven by a Wi-Fi-connected microcontroller that serves a small web interface for adjusting brightness and colour remotely, rather than requiring physical access to the chamber itself. This made it possible to set a single fixed preset for all capture sessions, and to verify that preset's brightness against the mean pixel intensity of the existing training images whenever a check was needed, rather than relying on visual judgement alone.
 
 \begin{figure}[H]
-\centering
-\includegraphics[width=0.6\linewidth]{images/chamber_lighting.jpg}
-\caption{Empty chamber under the calibrated white lighting preset used for all data capture, confirmed to match the dataset's measured brightness distribution.}
+    \centering
+    \includegraphics[width=0.6\linewidth]{images/chamber_lighting.jpg}
+    \caption{Empty chamber under the fixed white lighting preset.}
+    \label{fig:chamber-lighting}
 \end{figure}
 
 \chapter{Model Fine-Tuning}
 
-This chapter describes the training of the final three-class (unripe, ripe, overripe) detection model on the chamber dataset described in Chapter~5.
+This chapter describes the training and evaluation of the final three-class tomato detection model (unripe, ripe, and overripe) using the chamber dataset described in Chapter~4.
 
 \section{Train/Validation Split by Tomato}
 
-An important methodological correction was made at this stage. An initial dataset split assigned individual \emph{frames} to train or validation at random, meaning different rotational views of the same physical tomato could appear in both the training set and the validation set simultaneously. Since the six views of one tomato are highly similar, this allows a model to score well on validation simply by having already seen that same fruit (from a different angle) during training -- inflating the validation metric without testing genuine generalization.
+An important methodological correction was made when preparing the final training and validation datasets. In an initial split, individual \emph{frames} were randomly assigned to either the training or validation set. This meant that different rotational views of the same physical tomato could appear in both sets. Since the six views of a tomato share similar visual characteristics, the model could perform well on the validation set simply because it had already encountered the same tomato during training, albeit from a different angle. This would inflate the validation metrics without providing a reliable measure of generalization to previously unseen tomatoes.
 
-This was corrected by splitting at the level of the \emph{tomato}, not the frame: all six views of a given tomato are assigned entirely to either the training set or the validation set, never split across both.
+To avoid this, the dataset was split at the level of individual tomatoes rather than frames. All six views of a given tomato were assigned entirely to either the training set or the validation set, ensuring that no physical tomato appeared in both.
 
 \begin{table}[H]
-\centering
-\caption{Final dataset split, by tomato}
-\begin{tabular}{|l|c|c|c|}
-\hline
-\textbf{Class} & \textbf{Tomatoes (train / val)} & \textbf{Train frames} & \textbf{Val frames} \\
-\hline
-Unripe & 6 / 1 & 36 & 6 \\
-Ripe & 9 / 2 & 54 & 12 \\
-Overripe & 7 / 1 & 42 & 6 \\
-\hline
-\end{tabular}
+    \centering
+    \begin{tabular}{|l|c|c|c|}
+        \hline
+        \textbf{Class} & \textbf{Tomatoes (Train / Val)} & \textbf{Train Frames} & \textbf{Val Frames} \\
+        \hline
+        Unripe & 6 / 1 & 36 & 6 \\
+        Ripe & 9 / 2 & 54 & 12 \\
+        Overripe & 7 / 1 & 42 & 6 \\
+        \hline
+    \end{tabular}
+    \caption{Final training and validation split at the tomato level.}
+    \label{tab:final-dataset-split}
 \end{table}
 
 \section{Training Configuration}
 
-A YOLO11n model was fine-tuned on this dataset at an input resolution of 640$\times$640, for 80 epochs. Two initializations were compared: continuing from the project's existing two-class (ripe/unripe) chamber-trained weights, versus training fresh from COCO-pretrained weights. Both variants converged to comparable validation performance; the COCO-initialized model was ultimately selected as the final model, as it produced cleaner, less hedged predictions on the ripe class and did not depend on an earlier training run whose own validation split had partially overlapped with tomatoes later used for testing.
+A YOLO11n model, initialized from COCO-pretrained weights, was fine-tuned on the prepared chamber dataset using an input resolution of $640 \times 640$ for 80 epochs. This approach was adopted in place of continuing from the MTP-1 model, since the earlier model had been trained on the mismatched, black-background dataset discussed in Chapter~3.
 
 \begin{table}[H]
-\centering
-\caption{Final model validation metrics (same-session held-out split), epoch 80}
-\begin{tabular}{|l|c|}
-\hline
-\textbf{Metric} & \textbf{Value} \\
-\hline
-Precision & 0.981 \\
-Recall & 0.986 \\
-mAP50 & 0.981 \\
-mAP50-95 & 0.944 \\
-\hline
-\end{tabular}
+    \centering
+    \begin{tabular}{|l|c|}
+        \hline
+        \textbf{Metric} & \textbf{Value} \\
+        \hline
+        Precision & 0.981 \\
+        Recall & 0.986 \\
+        mAP50 & 0.981 \\
+        mAP50-95 & 0.944 \\
+        \hline
+    \end{tabular}
+    \caption{Validation metrics of the final model at epoch 80.}
+    \label{tab:final-model-metrics}
 \end{table}
 
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.85\linewidth]{images/training_curves.png}
-\caption{Training and validation loss/metric curves for the final three-class model.}
-\end{figure}
+The normalized confusion matrix in Figure~\ref{fig:normalized-confusion-matrix} provides a class-wise view of the model's predictions on the held-out validation set.
 
 \begin{figure}[H]
-\centering
-\includegraphics[width=0.6\linewidth]{images/confusion_matrix_normalized.png}
-\caption{Normalized confusion matrix on the same-session held-out validation split.}
+    \centering
+    \includegraphics[width=0.75\linewidth]{images/confusion_matrix_normalized.png}
+    \caption{Normalized confusion matrix on the same-session held-out validation set.}
+    \label{fig:normalized-confusion-matrix}
 \end{figure}
 
-As established in Chapter~4, however, a same-session validation split -- even one correctly separated by tomato -- is still not sufficient evidence that a model generalizes beyond the specific conditions of one capture session. This question is addressed directly in the next chapter.
+The confusion matrix shows a strongly diagonal pattern, with the unripe and overripe classes almost perfectly separated from one another and from the ripe class. The small amount of off-diagonal mass is concentrated on the ripe class, consistent with the fragile ripe/overripe boundary discussed in Chapter~3, and with a small fraction of ripe instances not receiving a confident detection at all -- consistent with the precision and recall values reported in Table~\ref{tab:final-model-metrics} above. The training and validation loss and metric curves underlying this result are shown in Figure~\ref{fig:training-curves} on the following page.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\linewidth]{images/training_curves.png}
+    \caption{Training and validation loss and metric curves for the final three-class model.}
+    \label{fig:training-curves}
+\end{figure}
 
 \chapter{Evaluation and Generalization Testing}
 
-\section{The Generalization Gap}
+This chapter examines whether the fine-tuned model generalizes to tomatoes captured in independent data collection sessions. While the tomato-level split described in Chapter~5 prevents the same physical tomato from appearing in both the training and validation sets, both sets were captured under the same session conditions. Consequently, the validation results alone do not establish how well the model performs on previously unseen tomatoes captured during different sessions. To investigate this, the final model was evaluated on independently collected chamber images.
 
-To test whether the fine-tuned model generalized beyond its own training session, a separate test set was captured on a different day: 6 ripe and 6 unripe tomatoes, none of which had been used in training, captured under the same lighting protocol but in an independent session.
+\section{Cross-Session Test Results}
 
-The first run of this test produced a clear failure: on the held-out ripe tomatoes, the model classified \textbf{0 of 6} tomatoes correctly, with every ripe tomato misclassified as overripe at approximately 0.96 confidence. Unripe tomatoes from the same new session were classified correctly on 6 of 6. This confirmed that even the corrected, real-chamber-trained model had not yet generalized across sessions for the ripe class specifically -- the same fragile ripe/overripe boundary identified in Chapter~4, now reappearing in a new form.
+To evaluate generalization across all three ripeness classes, an independent test set was prepared using a completely new batch of tomatoes, distinct from those used during training. The batch consisted of 10 ripe, 10 unripe, and 8 overripe tomatoes, resulting in 168 frames in total. These images were captured on a separate day under the same chamber lighting protocol. The tomatoes were visually verified to be physically distinct from those used in training, based on differences in skin texture and blemish patterns.
 
-\section{Diagnosis and Correction}
-
-The most plausible explanation is that the ripe class, trained on only 8 tomatoes from a single batch and session, had not seen enough natural variation in ripe tomato appearance to generalize to a new batch. To address this directly, three of the six new-session ripe tomatoes were added to the training set (bringing the ripe class to 11 tomatoes total, as reflected in Chapter~6's final split), and the remaining three were kept as a genuinely held-out generalization test.
-
-\section{Final Held-Out Results}
+Each frame in this test was evaluated independently, without aggregating confidence scores across the six views of a tomato. This provides a measure of single-frame classification performance rather than a fused per-tomato decision.
 
 \begin{table}[H]
-\centering
-\caption{Held-out, cross-session test results (frames correctly classified as top-ranked class / total; tomatoes classified correctly / total)}
-\begin{tabular}{|l|c|c|}
-\hline
-\textbf{Class} & \textbf{Frame accuracy} & \textbf{Tomato accuracy} \\
-\hline
-Ripe (3 held-out tomatoes) & 18/18 & 3/3 \\
-Unripe (6 held-out tomatoes) & 34/36 & 6/6 \\
-Overripe & \textit{[to be inserted]} & \textit{[to be inserted]} \\
-\hline
-\end{tabular}
+    \centering
+    \begin{tabular}{|l|c|c|}
+        \hline
+        \textbf{Class} & \textbf{Frames} & \textbf{Accuracy} \\
+        \hline
+        Unripe & 60 & 58/60 (96.7\%) \\
+        Ripe & 60 & 57/60 (95.0\%) \\
+        Overripe & 48 & 46/48 (95.8\%) \\
+        \hline
+        \textbf{Overall} & \textbf{168} & \textbf{161/168 (95.8\%)} \\
+        \hline
+    \end{tabular}
+    \caption{Per-frame classification accuracy on the final independent cross-session test set.}
+    \label{tab:cross-session-accuracy}
 \end{table}
 
-\textit{Overripe generalization testing was carried out following the same cross-session protocol as ripe and unripe above; the corresponding results will be inserted here once finalized.}
-
-Per-tomato classification is computed by summing the model's confidence score for each class across all six captured views of that tomato and selecting the class with the highest total -- the same multi-view fusion principle used for the mobile application in Stage-1, now applied to the detection model's confidence outputs rather than a plain classifier's softmax vector.
+The corresponding confusion matrix is presented in Figure~\ref{tab:cross-session-confusion}. Rows represent the ground-truth classes, while columns represent the model's predicted classes.
 
 \begin{figure}[H]
-\centering
-\includegraphics[width=0.85\linewidth]{images/val_predictions.jpg}
-\caption{Example model predictions on a held-out validation batch, showing correctly localized and classified direct and mirror-view tomato instances.}
+    \centering
+    \includegraphics[width=0.65\linewidth]{images/cross_session_confusion_matrix.png}
+    \caption{Confusion matrix for the final cross-session test set.}
+    \label{tab:cross-session-confusion}
 \end{figure}
+
+Table~\ref{tab:cross-session-class-metrics} presents the corresponding precision, recall, and F1-score for each class.
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{|l|c|c|c|c|}
+        \hline
+        \textbf{Class} & \textbf{Precision} & \textbf{Recall} & \textbf{F1-score} & \textbf{Support} \\
+        \hline
+        Unripe & 1.000 & 0.967 & 0.983 & 60 \\
+        Ripe & 0.934 & 0.950 & 0.942 & 60 \\
+        Overripe & 0.939 & 0.958 & 0.949 & 48 \\
+        \hline
+    \end{tabular}
+    \caption{Per-class precision, recall, and F1-score on the final cross-session test set.}
+    \label{tab:cross-session-class-metrics}
+\end{table}
+
+Of the seven misclassified frames, five involved confusion between the ripe and overripe classes: three ripe frames were predicted as overripe, while two overripe frames were predicted as ripe. This is consistent with the difficulty in distinguishing these two classes identified during the earlier diagnostic experiments in Chapter~3. The remaining two errors came from a single unripe tomato, for which two frames were predicted as ripe.
 
 \section{Interpreting These Results}
 
-The ripe-class failure and recovery illustrates a broader point relevant to the rest of this project: a model's reported validation accuracy is only informative to the extent that the validation data is genuinely independent of training, both at the level of individual images and at the level of the underlying batch or session the data was drawn from. The same-session 0.944 mAP50-95 reported in Chapter~6 did not predict this failure; the cross-session test did. This result is treated as the primary evidence of the final model's real-world performance, rather than the same-session validation metric alone.
+The same-session validation mAP50-95 of 0.944 reported in Chapter~5 reflects performance on tomatoes from the same data collection session as training. Evaluating on an independent, cross-session batch provides a stronger test of generalization, since tomatoes from the same session can share incidental visual similarities that a model could exploit without genuinely learning the underlying ripeness distinction. The final independent test achieved 95.8\% accuracy across 168 images, with errors concentrated on the ripe/overripe boundary, supporting cross-session generalization.
 
 \chapter{Edge Deployment on Raspberry Pi}
 
-This chapter describes the deployment of the final fine-tuned model onto a Raspberry Pi 4, including backend comparison, performance benchmarking, and the design of an event-triggered inference approach.
+This chapter describes the deployment of the final fine-tuned model on a Raspberry Pi 4. It covers the hardware selection, model export and prediction parity verification, inference performance benchmarking, evaluation of INT8 quantization, and implementation of an event-triggered inference approach.
 
 \section{Hardware Selection}
 
-Two single-board computers were considered. A Raspberry Pi Zero W, initially available, was assessed by specification (a single-core, 1\,GHz ARMv6 processor with 512\,MB of RAM) to be unable to run the required inference stack at all, since no current PyTorch build targets its processor architecture; this was not empirically tested, as the only available SD card for this board failed during setup. A Raspberry Pi 4 Model B (8\,GB RAM, quad-core 64-bit ARM Cortex-A72) was used instead and is the hardware this chapter's results are based on.
+Two single-board computers were considered for deployment. The Raspberry Pi Zero W, which was initially available, was assessed based on its specifications: a single-core 1 GHz ARMv6 processor and 512 MB of RAM. Its processor architecture is not supported by current PyTorch builds, making it unsuitable for the intended inference setup. This was not verified through an actual inference experiment, as the only available SD card for this board failed during setup.
+
+A Raspberry Pi 4 Model B with 8 GB of RAM and a quad-core 64-bit ARM Cortex-A72 processor was therefore used for deployment. All hardware performance measurements and deployment results presented in this chapter are based on this board.
 
 \section{Model Export and Parity Verification}
 
-The final PyTorch model was exported to NCNN format, a lightweight C++ inference library designed for ARM CPUs without GPU acceleration, at full (FP32) precision. Before trusting any Pi-based results, the exported model's predictions were directly compared against the original PyTorch model on seven held-out test frames, to confirm the export process had not altered the model's behaviour.
+The final PyTorch model was exported to NCNN format at full 32-bit floating-point (FP32) precision. NCNN is a lightweight inference framework designed to support efficient neural network execution on CPU-based devices, including ARM platforms.
 
-\begin{table}[H]
-\centering
-\caption{PC (PyTorch, GPU) vs. Raspberry Pi (NCNN, CPU) -- prediction parity on 7 held-out frames}
-\begin{tabular}{|l|c|c|}
-\hline
- & \textbf{PC (PyTorch)} & \textbf{Raspberry Pi 4 (NCNN)} \\
-\hline
-Classes predicted & all 7 correct & all 7 correct, identical classes \\
-Confidence agreement & -- & matched to within 0.01 on 6/7 frames \\
-Mean latency & 16\,ms & 389\,ms \\
-\hline
-\end{tabular}
-\end{table}
+Before evaluating inference performance on the Raspberry Pi, the exported model was compared against the original PyTorch model using seven held-out test frames. This was done to verify that the export process had preserved the model's predictions. Both implementations correctly classified all seven frames and produced identical top-ranked classes. The confidence scores also showed close agreement, differing by no more than 0.01 on six of the seven frames.
 
-All seven frames produced identical top-ranked classifications on both platforms, confirming the exported model preserves the PyTorch model's behaviour; the only material difference is inference speed, which is expected given the absence of a GPU on the embedded board.
+In terms of inference speed, the PyTorch model on the PC achieved a mean latency of 16 ms, while the NCNN model on the Raspberry Pi 4 took 389 ms per frame. These results indicate that the export process preserved the model's prediction behaviour on the tested samples, with the main difference being inference latency, driven by the Raspberry Pi's more limited computational resources and the absence of GPU acceleration.
 
 \section{Thread-Count Tuning}
 
-NCNN's inference speed on a multi-core ARM CPU depends on the number of CPU threads it is permitted to use. This was benchmarked directly, bypassing the higher-level Python wrapper (which did not expose this setting reliably) and calling the NCNN library directly.
+NCNN supports multi-threaded inference, allowing it to utilize multiple CPU cores on the Raspberry Pi. Since the number of threads can affect inference latency, experiments were conducted with different thread counts. These measurements were obtained by calling the NCNN library directly, bypassing the higher-level Python wrapper, which did not reliably expose the thread-count setting.
 
 \begin{table}[H]
-\centering
-\caption{NCNN inference latency vs.\ CPU thread count, Raspberry Pi 4}
-\begin{tabular}{|c|c|c|}
-\hline
-\textbf{Threads} & \textbf{Mean latency} & \textbf{FPS} \\
-\hline
-1 & 680\,ms & 1.47 \\
-2 & 440\,ms & 2.27 \\
-3 & 405\,ms & 2.47 \\
-4 & 362\,ms & 2.76 \\
-\hline
-\end{tabular}
+    \centering
+    \begin{tabular}{|c|c|c|}
+        \hline
+        \textbf{Threads} & \textbf{Mean Latency} & \textbf{FPS} \\
+        \hline
+        1 & 680 ms & 1.47 \\
+        2 & 440 ms & 2.27 \\
+        3 & 405 ms & 2.47 \\
+        4 & 362 ms & 2.76 \\
+        \hline
+    \end{tabular}
+    \caption{NCNN inference latency for different CPU thread counts on the Raspberry Pi 4.}
+    \label{tab:ncnn-threads}
 \end{table}
 
-Using all four of the Pi's CPU cores very nearly doubles throughput compared to a single thread, with diminishing returns beyond two threads. 362\,ms per inference, using all four cores, is taken as the practical latency figure for this hardware.
+Increasing the number of threads improved inference speed, with the largest improvement observed when moving from one to two threads. Using all four CPU cores reduced the mean latency from 680 ms to 362 ms, nearly doubling the inference throughput compared with single-threaded execution. However, the improvements became smaller beyond two threads. The four-thread configuration, which achieved a mean latency of 362 ms per inference, was selected for subsequent deployment experiments.
 
 \section{INT8 Quantization: Evaluated and Rejected}
 
-As a further optimization, the model was additionally exported to TensorFlow Lite with full INT8 quantization, which reduces both model size and, in principle, computation by representing weights and activations as 8-bit integers rather than 32-bit floats. This was benchmarked under the same conditions as the NCNN FP32 model, using the same seven held-out frames.
+As a further optimization, the model was also exported to TensorFlow Lite (TFLite) using full INT8 quantization. This represents model weights and activations using 8-bit integers instead of 32-bit floating-point values, potentially reducing memory requirements and computational cost.
 
-\begin{table}[H]
-\centering
-\caption{NCNN FP32 vs.\ TFLite INT8 on Raspberry Pi 4}
-\begin{tabular}{|p{2.8cm}|p{5.3cm}|p{5.3cm}|}
-\hline
- & \textbf{NCNN (FP32)} & \textbf{TFLite (INT8)} \\
-\hline
-Mean latency & 362\,ms & 484\,ms \\
-\hline
-Ripe classification & correct on all held-out frames & incorrectly ranked ``overripe'' above ``ripe'' on one held-out ripe frame \\
-\hline
-\end{tabular}
-\end{table}
+The quantized model was benchmarked on the Raspberry Pi using the same seven held-out frames used for the earlier parity evaluation, and its performance was compared with the thread-tuned NCNN FP32 model. The NCNN FP32 model achieved a mean latency of 362 ms and classified all held-out frames correctly, including the ripe class. The TFLite INT8 model, by contrast, was slower, with a mean latency of 484 ms, and it also ranked ``overripe'' above ``ripe'' on one held-out ripe frame, a misclassification the FP32 model did not make. The TFLite INT8 model was therefore slower than the NCNN FP32 model on the Raspberry Pi, despite the theoretical computational advantages of integer arithmetic -- likely due to differences in how the two inference frameworks are optimized for this hardware.
 
-INT8 quantization was both slower in practice on this hardware (likely due to the available inference runtime's optimization for this specific board being weaker than NCNN's hand-tuned ARM kernels, despite INT8's theoretical compute advantage) and less accurate, specifically on the already-fragile ripe/overripe boundary identified in Chapter~4. This is plausibly compounded by the limited calibration set available for quantization (24 images, against a generally recommended minimum of around 300). On this basis, INT8 quantization was not adopted, and the NCNN FP32 export remains the deployed model.
+The quantization process used a calibration set of 24 images, which may have been insufficient to represent the variation in the dataset accurately. Given the slower observed inference time and the prediction difference near the already-sensitive ripe/overripe boundary, INT8 quantization was not adopted. The NCNN FP32 model was retained for deployment.
 
 \section{Event-Triggered Inference}
 
-A specific design requirement was that the deployed model should not run continuously, but only when a tomato is actually present to be classified, with a clear separation in time between successive classification events. Two complementary implementations were built to satisfy this.
+An important design requirement was to avoid running the detection model continuously. Instead, inference should be initiated only when a tomato is ready to be classified, with successive classification events separated in time. Two complementary triggering modes were implemented to support this requirement.
 
-\textbf{Manual-trigger mode} performs no camera polling or inference at all while idle; a classification sequence (six views, with a one-second interval between them to allow the tomato to be rotated) is triggered only on an explicit input, and the resulting per-class confidence scores are summed across all six views to produce a single verdict, following the same multi-view fusion principle described in Chapter~7.
+\textbf{Manual-trigger mode} performs no camera polling or model inference while the system is idle. A classification sequence begins only after an explicit user input. Once triggered, the system captures six views at one-second intervals, allowing the tomato to be rotated between successive captures. The confidence scores for each class are accumulated across all six views, and the class with the highest cumulative score is selected as the final prediction. This follows the multi-view fusion principle used in the Stage-1 mobile application described in Chapter~2, adapted to the detection model's confidence outputs.
 
-\textbf{Automatic-trigger mode} uses a cheap presence-detection check -- comparing the saturation and frame-to-frame motion of a downsampled camera frame against a calibrated empty-chamber baseline -- running several times per second with no model inference involved. The detection model is invoked only once a tomato has been detected as present \emph{and} stationary for a sustained period (filtering out hand motion during placement), and the system will not re-trigger on the same tomato until the chamber has registered as empty again. In testing, this correctly fired a single classification event per tomato placed, correctly ignored the motion of a hand placing or removing a tomato, and reported that the detection model was active for only a small fraction of total runtime, consistent with the design requirement.
+\textbf{Automatic-trigger mode} uses a lightweight presence-detection mechanism to identify when a tomato has been placed inside the chamber. It compares the saturation and frame-to-frame motion of downsampled camera frames against a calibrated empty-chamber baseline. These checks run several times per second without invoking the detection model. Model inference is triggered only when a tomato is detected as present and remains stationary for a sustained period, thereby filtering out transient motion caused by a hand placing the tomato. After a classification event, the system does not trigger again until the chamber is detected as empty.
 
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.6\linewidth]{images/demo_capture_view.jpg}
-\caption{A single captured view from a triggered classification event on the Raspberry Pi, correctly localizing both the direct and mirror-view tomato instances.}
-\end{figure}
+During testing, the automatic-trigger mechanism initiated a single classification event for each tomato placed in the chamber and ignored the motion associated with placing or removing a tomato. The detection model was active for only a small fraction of the total runtime, demonstrating that the event-triggered approach avoids unnecessary continuous inference.
 
 \chapter{Results}
 
-This chapter consolidates the key quantitative results from the preceding chapters.
-
+This chapter consolidates the key findings from the development and evaluation of the automated tomato sorting system. It brings together the results of the Stage-1 model diagnosis, training and evaluation of the final three-class detection model, and its deployment on the Raspberry Pi 4.
 \section{Diagnosis of the Stage-1 Model}
 
-\begin{table}[H]
-\centering
-\caption{Summary of diagnostic findings, Chapter 4}
-\begin{tabular}{|p{5cm}|p{9cm}|}
-\hline
-\textbf{Test} & \textbf{Finding} \\
-\hline
-Live empty-chamber test & Confident false-positive detection (``unripe'', 0.97 confidence) with no tomato present \\
-\hline
-Model-size comparison (YOLO11n vs.\ YOLO11s) & Both failed similarly on ripe-class chamber images (20.8\% vs.\ 18.8\% accuracy); rules out model capacity as the cause \\
-\hline
-Black-background re-test & Ripe accuracy dropped to 0\% (from 20.8\%) when background was artificially matched to training; rules out background mismatch as the sole cause \\
-\hline
-Visual colour comparison & Training ``ripe'' images are dull orange/amber; chamber-captured ripe tomatoes are vivid saturated red -- a colour only ever labelled ``overripe'' in training \\
-\hline
-\end{tabular}
-\end{table}
+The diagnostic experiments revealed significant limitations in the Stage-1 model's performance on actual chamber images. During the live empty-chamber test, the model produced a false-positive detection, classifying the empty chamber as ``unripe'' with a confidence of 0.97. To investigate the poor performance on ripe tomatoes, YOLO11n and YOLO11s were evaluated on the same chamber images. Both performed similarly, achieving accuracies of 20.8\% and 18.8\%, respectively, suggesting that increasing model size alone would not resolve the problem.
 
+A further experiment examined whether background mismatch was the primary cause. Chamber images were reprocessed by segmenting the tomatoes and replacing their backgrounds with black, following the Stage-1 preprocessing approach. However, ripe-class accuracy dropped to 0\%, indicating that background mismatch alone was insufficient to explain the failure.
+
+Visual comparison revealed that Stage-1 images labelled as ``ripe'' predominantly contained dull orange or amber tomatoes, whereas chamber-captured ripe tomatoes had a more vivid red appearance, closer to the Stage-1 ``overripe'' examples. Along with differences in tomato scale and framing, this highlighted a mismatch between the original training data and the actual chamber environment, motivating the collection of a new chamber-specific dataset.
 \section{Final Model Performance}
 
-\begin{table}[H]
-\centering
-\caption{Final three-class model -- summary of all reported evaluations}
-\begin{tabular}{|l|c|c|}
-\hline
-\textbf{Evaluation} & \textbf{Scope} & \textbf{Result} \\
-\hline
-Same-session validation (by-tomato split) & mAP50-95 & 0.944 \\
-Held-out, cross-session -- ripe & 3 tomatoes & 3/3 correct (18/18 frames) \\
-Held-out, cross-session -- unripe & 6 tomatoes & 6/6 correct (34/36 frames) \\
-Held-out, cross-session -- overripe & \textit{[pending]} & \textit{[to be inserted]} \\
-\hline
-\end{tabular}
-\end{table}
+The final three-class YOLO11n model was trained using the chamber dataset, with separate training and validation sets at the tomato level to prevent different views of the same physical tomato from appearing in both sets and achieved a validation mAP50-95 of 0.944. However, an initial independent evaluation revealed that none of the six held-out ripe tomatoes were classified correctly. Following the addition of three new ripe tomatoes to the training dataset, the model was evaluated on the remaining held-out samples, showing an improvement in ripe-class predictions.
+
+The final model was subsequently evaluated on a separate cross-session test set containing 168 frames from 28 previously unseen tomatoes. It correctly classified 58 out of 60 unripe frames (96.7\%), 57 out of 60 ripe frames (95.0\%), and 46 out of 48 overripe frames (95.8\%). Overall, the model correctly classified 161 out of 168 frames, achieving an accuracy of 95.8\%.
+
+Most errors occurred between the ripe and overripe classes, while the unripe class was distinguished more consistently. All three classes achieved F1-scores above 0.94. These results demonstrate improved performance across independently captured sessions under the same chamber setup and lighting protocol, although distinguishing visually similar ripeness stages remains challenging.
 
 \section{Edge Deployment Performance}
 
-\begin{table}[H]
-\centering
-\caption{Raspberry Pi 4 deployment summary}
-\begin{tabular}{|p{7.5cm}|p{6cm}|}
-\hline
-\textbf{Metric} & \textbf{Value} \\
-\hline
-Exported model format & NCNN, FP32 \\
-\hline
-Model size & 5.2\,MB (PyTorch) / $\approx$10\,MB (NCNN) \\
-\hline
-PC vs.\ Pi prediction parity (7 held-out frames) & 7/7 identical classifications \\
-\hline
-Mean inference latency (4 threads) & 362\,ms \\
-\hline
-INT8 alternative & rejected (slower and less accurate) \\
-\hline
-\end{tabular}
-\end{table}
+The final model was deployed on the Raspberry Pi 4 using the NCNN inference framework at full FP32 precision. The original PyTorch model occupied approximately 5.2 MB, while the exported NCNN model occupied approximately 10 MB. Prediction parity was verified using seven held-out frames, with both implementations producing identical top-ranked classifications on all seven frames. Their confidence scores also remained close, differing by no more than 0.01 on six of the seven frames.
+
+Inference benchmarking showed that using four CPU threads achieved the best measured latency of 362 ms per frame, corresponding to approximately 2.76 FPS. An alternative deployment using TFLite INT8 quantization was also evaluated but recorded a higher latency of 484 ms and produced an incorrect class ranking on one held-out ripe frame. Consequently, the NCNN FP32 implementation was retained.
+
+An event-triggered inference mechanism was also implemented to avoid unnecessary continuous execution of the detection model. The manual mode initiates classification only after explicit user input, while the automatic mode uses lightweight presence and motion checks to identify when a tomato has been placed and has become stationary. During testing, the automatic mode successfully initiated a single classification event per tomato placement while ignoring transient hand movements.
+
+Overall, the deployment experiments demonstrated that the final model could run on the Raspberry Pi 4 while maintaining consistency with the original implementation on the tested samples. The combination of multiview inference and event-triggered execution established a practical approach for running the model on the embedded hardware.
 
 \chapter{Conclusion and Future Work}
 
-Stage-2 began by establishing that the Stage-1 YOLO model's near-perfect validation metric did not reflect real deployment performance, and traced this to a specific, demonstrable cause: a colour-and-lighting mismatch between black-background training data and real chamber footage, compounded by a localization mismatch in object scale and framing. This diagnosis directly shaped the rest of the stage's work -- an automated annotation pipeline capable of labelling full, real-background chamber photographs was built using SAM2, a three-class chamber-captured dataset (including the logistically difficult overripe class) was collected and correctly split by tomato to avoid validation leakage, and the resulting fine-tuned model was evaluated not only on a same-session split but on a genuinely independent, cross-session test set -- which itself exposed and led to the correction of a further generalization gap on the ripe class.
+Stage-2 began by establishing that the near-perfect validation performance of the Stage-1 YOLO model did not translate to actual deployment performance. The experiments identified differences in tomato appearance between the training dataset and real chamber footage, along with a mismatch in object scale and framing. These findings shaped the subsequent work: an automated annotation pipeline using SAM2 was developed to label full chamber images, a three-class dataset was collected, and the data was split at the tomato level to prevent validation leakage. The resulting model was evaluated on both same-session and independent cross-session data, with the latter exposing an additional generalization gap in the ripe class that was addressed by expanding the training dataset.
 
-The final model was deployed on a Raspberry Pi 4, with its predictions verified to match the original PyTorch model exactly, its inference speed benchmarked and tuned, an INT8 quantization alternative evaluated and rejected on both speed and accuracy grounds, and an event-triggered inference design built and validated so that the model performs classification only when a tomato is actually present.
+The final model was deployed on a Raspberry Pi 4 using NCNN. Its predictions were verified against the original PyTorch implementation, inference performance was benchmarked and optimized through thread-count tuning, and an INT8 quantization alternative was evaluated but not adopted due to its higher latency and prediction differences. Additionally, manual and automatic event-triggered inference mechanisms were implemented to ensure that classification is performed only when required, rather than continuously.
 
-Several items remain open for continued work.
+Several aspects of the system remain open for further development. The cross-session test set can be expanded through additional capture sessions and tomato batches to establish greater confidence in the reported generalization results. This is particularly important for the overripe class, as sourcing genuinely overripe tomatoes remains logistically challenging. Further testing under sustained workloads is also required to evaluate whether inference latency remains stable during extended operation and to assess the thermal behaviour of the Raspberry Pi.
 
-\begin{itemize}
-    \item \textbf{Overripe generalization testing}, following the same cross-session protocol used for ripe and unripe, is in progress; results will be incorporated into Chapter~7 once complete.
-    \item \textbf{Sustained-load and thermal testing} on the Raspberry Pi, to confirm inference latency remains stable over extended continuous operation rather than only short benchmark runs, has not yet been carried out.
-    \item \textbf{A dedicated AI-accelerator camera module (reCamera)} was investigated as a higher-performance alternative to the Raspberry Pi, but a decision on whether to pursue this is pending a defined throughput requirement (tomatoes processed per minute) from the project's practical deployment goals.
-    \item \textbf{Testing with the chamber's dedicated camera module}, rather than a general-purpose USB webcam, to assess whether a different camera's colour and lens characteristics reintroduce a version of the domain-gap problem diagnosed in Chapter~4, specific to that hardware.
-    \item \textbf{Integration with the physical sorting mechanism} -- connecting the triggered-inference classification output to the Stage-1 prototype's feeder and sorting actuators -- remains to be carried out for a fully end-to-end automated system.
-\end{itemize}
+Another area for exploration is the use of a dedicated AI-accelerator camera module, such as reCamera, as a higher-performance alternative to the Raspberry Pi. A decision on this would depend on establishing the required processing throughput in terms of tomatoes classified per minute.
 
+Finally, integration with the physical sorting mechanism remains an important step towards completing the automated system. This would enable the system to perform the complete process, from image capture and ripeness classification to the physical sorting of tomatoes.
 \end{document}

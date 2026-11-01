@@ -4,7 +4,7 @@ from pathlib import Path
 # ─── CONFIG ──────────────────────────────────────────────────────────
 DATASET_ROOT = r"D:\MTP-2\YOLO_SAM\fullframe_dataset"
 OUTPUT_ROOT = r"D:\MTP-2\YOLO_SAM\validation_preview"
-CLASS_NAMES = ["overripe"]
+CLASS_NAMES = ["unripe", "ripe", "overripe"]
 CLASS_COLORS = {0: (0, 255, 0), 1: (0, 0, 255), 2: (255, 0, 255)}  # BGR: unripe=green, ripe=red, overripe=magenta
 
 img_dir = Path(DATASET_ROOT) / "images"
